@@ -1,73 +1,77 @@
-// Importa el objeto de modelos (User, Role, etc.) desde la carpeta models
 import db from "../models/index.js";
-
-// Importa la librería jsonwebtoken para generar tokens JWT
 import jwt from "jsonwebtoken";
-
-// Importa bcryptjs para encriptar y comparar contraseñas
 import bcrypt from "bcryptjs";
-
-// Importa la configuración del secreto JWT desde un archivo de
-// configuración
+import crypto from "crypto";
 import authConfig from "../config/auth.config.js";
 
-// Extrae los modelos User y Role desde el objeto db
-const { user: User, role: Role } = db;
+const {
+  user: User,
+  role: Role,
+  refreshToken: RefreshToken,
+} = db;
 
-// Controlador para el registro de usuarios
+
+// ==============================
+// REGISTRO
+// ==============================
+
 export const signup = async (req, res) => {
   try {
-    // Extrae los datos enviados en el cuerpo de la solicitud
-    const { username, email, password, roles } = req.body;
+    const { username, email, password } = req.body;
 
-    // Encripta la contraseña antes de guardarla en la base de datos
     const hashedPassword = await bcrypt.hash(password, 8);
 
-    // Busca el rol "user" en la base de datos para asignarlo por
-    // defecto
-    const userRole = await Role.findOne({ where: { name: "user" } });
+    const userRole = await Role.findOne({
+      where: { name: "user" },
+    });
 
-    // Crea un nuevo usuario con los datos proporcionados y la
-    // contraseña encriptada
     const user = await User.create({
       username,
       email,
       password: hashedPassword,
     });
 
-    // Asocia el rol encontrado al usuario (relación muchos a muchos)
     await user.setRoles([userRole]);
 
-    // Devuelve respuesta exitosa
-    res.status(201).json({ message: "User registered successfully!" });
+    res.status(201).json({
+      message: "User registered successfully!",
+    });
+
   } catch (error) {
-    // Si ocurre un error, responde con código 500 y el mensaje del
-    // error
-    res.status(500).json({ message: error.message });
+    res.status(500).json({
+      message: error.message,
+    });
   }
 };
 
-// Controlador para el inicio de sesión
+
+// ==============================
+// LOGIN
+// ==============================
+
 export const signin = async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    // Busca el usuario por su nombre de usuario, incluyendo sus roles
     const user = await User.findOne({
       where: { username },
-      include: { model: Role, as: "roles" },
+      include: {
+        model: Role,
+        as: "roles",
+      },
     });
 
-    // Si no se encuentra el usuario, responde con error 404
     if (!user) {
-      return res.status(404).json({ message: "User Not found." });
+      return res.status(404).json({
+        message: "User Not found.",
+      });
     }
 
-    // Compara la contraseña proporcionada con la almacenada (ya
-    // encriptada)
-    const passwordIsValid = await bcrypt.compare(password, user.password);
+    const passwordIsValid = await bcrypt.compare(
+      password,
+      user.password
+    );
 
-    // Si la contraseña no es válida, responde con error 401
     if (!passwordIsValid) {
       return res.status(401).json({
         accessToken: null,
@@ -75,24 +79,153 @@ export const signin = async (req, res) => {
       });
     }
 
-    // Si la contraseña es válida, genera un token JWT que expira en 24 horas
-    const token = jwt.sign({ id: user.id }, authConfig.secret, {
-      expiresIn: 86400, // 24 horas
+    // Access Token temporal: 20 segundos
+    const accessToken = jwt.sign(
+      { id: user.id },
+      authConfig.secret,
+      {
+        expiresIn: 20,
+      }
+    );
+
+    // Refresh Token: 7 días
+    const refreshTokenValue = crypto
+      .randomBytes(40)
+      .toString("hex");
+
+    const expiryDate = new Date();
+
+    expiryDate.setDate(
+      expiryDate.getDate() + 7
+    );
+
+    await RefreshToken.create({
+      token: refreshTokenValue,
+      expiryDate,
+      userId: user.id,
     });
 
-    // Crea un array con los roles del usuario en el formato 'ROLE_ADMIN', 'ROLE_USER', etc.
-    const authorities = user.roles.map((role) => `ROLE_${role.name.toUpperCase()}`);
+    const authorities = user.roles.map(
+      (role) =>
+        `ROLE_${role.name.toUpperCase()}`
+    );
 
-    // Responde con la información del usuario y el token de acceso
     res.status(200).json({
       id: user.id,
       username: user.username,
       email: user.email,
       roles: authorities,
-      accessToken: token,
+      accessToken,
+      refreshToken: refreshTokenValue,
     });
+
   } catch (error) {
-    // Si ocurre un error en el proceso, responde con código 500 y el mensaje del error
-    res.status(500).json({ message: error.message });
+    res.status(500).json({
+      message: error.message,
+    });
+  }
+};
+
+
+// ==============================
+// REFRESH TOKEN
+// ==============================
+
+export const refreshToken = async (req, res) => {
+  try {
+    const {
+      refreshToken: requestToken,
+    } = req.body;
+
+    if (!requestToken) {
+      return res.status(403).json({
+        message: "Refresh Token is required!",
+      });
+    }
+
+    const storedToken =
+      await RefreshToken.findOne({
+        where: {
+          token: requestToken,
+        },
+      });
+
+    if (!storedToken) {
+      return res.status(403).json({
+        message:
+          "Refresh token is not in database!",
+      });
+    }
+
+    if (
+      storedToken.expiryDate.getTime() <
+      Date.now()
+    ) {
+      await storedToken.destroy();
+
+      return res.status(403).json({
+        message: "Refresh token expired.",
+      });
+    }
+
+    // Nuevo Access Token temporal: 20 segundos
+    const newAccessToken = jwt.sign(
+      { id: storedToken.userId },
+      authConfig.secret,
+      {
+        expiresIn: 20,
+      }
+    );
+
+    res.status(200).json({
+      accessToken: newAccessToken,
+      refreshToken: requestToken,
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      message: error.message,
+    });
+  }
+};
+
+
+// ==============================
+// CERRAR SESIÓN
+// ==============================
+
+export const signout = async (req, res) => {
+  try {
+    const {
+      refreshToken: requestToken,
+    } = req.body;
+
+    if (!requestToken) {
+      return res.status(400).json({
+        message: "Refresh Token is required!",
+      });
+    }
+
+    const deleted =
+      await RefreshToken.destroy({
+        where: {
+          token: requestToken,
+        },
+      });
+
+    if (deleted === 0) {
+      return res.status(404).json({
+        message: "Refresh token not found.",
+      });
+    }
+
+    res.status(200).json({
+      message: "Signout successful!",
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      message: error.message,
+    });
   }
 };

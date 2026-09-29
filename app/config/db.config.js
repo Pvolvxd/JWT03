@@ -2,7 +2,7 @@
 export default {
   HOST: "localhost",
   USER: "root",
-  PASSWORD: "",
+  PASSWORD: "root",
   DB: "db",
   PORT: 3306,
   dialect: "mysql",
